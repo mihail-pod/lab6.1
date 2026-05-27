@@ -9,28 +9,36 @@ import utils.CompilerException;
 
 import java.util.List;
 
-// Рекурсивный parser
+// Parser строит AST по префиксной записи вида (*(+A,B),C)
+// В проекте используется рекурсивный descent parser: каждый вызов parseExpression()
+// разбирает ровно одно выражение и возвращает узел дерева
 public class Parser {
     private final List<Token> tokens;
     private int position;
 
-    // список токенов от лексера
+    // Parser получает уже готовый список токенов от Lexer
+    // position указывает на текущий токен, который еще не был разобран
     public Parser(List<Token> tokens) {
         this.tokens = tokens;
     }
 
-    // разбор входа и проверка лишних токенов.
+    // Точка входа синтаксического анализа
+    // После разбора одного выражения обязательно проверяем EOF, чтобы отловить лишний текст
     public Node parse() {
         Node root = parseExpression();
         expect(TokenType.EOF, "После выражения найдены лишние символы");
         return root;
     }
 
-    // Разбирает одно выражение и рекурсивно строит AST-дерево
+    // Разбирает одно выражение и рекурсивно строит AST
+    // Возможны два типа выражений
+    // 1. лист: число или переменная
+    // 2. бинарная операция в скобках: (operator left,right)
     private Node parseExpression() {
         Token current = current();
 
-        // Число и переменная являются простыми листьями дерева
+        // Число и переменная становятся листовыми узлами AST
+        // У них нет дочерних элементов, поэтому рекурсия здесь заканчивается
         if (match(TokenType.NUMBER)) {
             return ValueNode.number(Integer.parseInt(current.getText()));
         }
@@ -38,7 +46,8 @@ public class Parser {
             return ValueNode.variable(current.getText());
         }
 
-        // Составное выражение всегда начинается со скобки
+        // Составное выражение начинается с открывающей скобки
+        // После нее обязательно должна идти операция
         if (match(TokenType.LPAREN)) {
             Token operator = current();
             if (!isOperator(operator.getType())) {
@@ -46,6 +55,8 @@ public class Parser {
             }
             position++;
 
+            // Левый и правый операнды сами являются выражениями
+            // Поэтому parser поддерживает вложенные конструкции
             Node left = parseExpression();
             expect(TokenType.COMMA, "Пропущена запятая между операндами");
             Node right = parseExpression();
@@ -61,12 +72,12 @@ public class Parser {
         throw error("Неправильная структура выражения");
     }
 
-    // Проверяет является ли токен одной из разрешенных операций
+    // Проверяет, является ли токен допустимой арифметической операцией
     private boolean isOperator(TokenType type) {
         return type == TokenType.PLUS || type == TokenType.MINUS || type == TokenType.MUL || type == TokenType.DIV;
     }
 
-    // Если текущий токен нужного типа потребляет его и возвращает true
+    // Если текущий токен имеет нужный тип, он считается разобранным, а position сдвигается на следующий токен
     private boolean match(TokenType type) {
         if (current().getType() == type) {
             position++;
@@ -75,19 +86,19 @@ public class Parser {
         return false;
     }
 
-    // Требует конкретный токен и формирует понятную ошибку если его нет.
+    // Требует конкретный токен. Если токена нет, ошибка содержит позицию во входной строке
     private void expect(TokenType type, String message) {
         if (!match(type)) {
             throw error(message);
         }
     }
 
-    // Возвращает текущий токен без сдвига позиции
+    // Возвращает текущий токен без сдвига position
     private Token current() {
         return tokens.get(position);
     }
 
-    // Добавляет к сообщению позицию токена, на котором парсер остановился
+    // Создает CompilerException с позицией токена, на котором parser остановился
     private CompilerException error(String message) {
         return new CompilerException(message, current().getPosition());
     }

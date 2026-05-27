@@ -44,6 +44,9 @@ public class AstOptimizer {
         if ("/".equals(op) && isNumber(right, 1)) {
             return left;
         }
+        if ("/".equals(op) && isNumber(left, 0)) {
+            return left;
+        }
 
         return new BinaryOperationNode(op, left, right);
     }

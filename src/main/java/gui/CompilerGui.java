@@ -13,35 +13,42 @@ import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JSplitPane;
 import javax.swing.JTextArea;
+import javax.swing.JTextField;
+import javax.swing.JTextPane;
 import javax.swing.SwingUtilities;
-import java.awt.BorderLayout;
+import javax.swing.text.BadLocationException;
+import javax.swing.text.DefaultHighlighter;
+import javax.swing.text.Highlighter;
+import java.awt.*;
 import java.io.File;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.stream.Collectors;
 
-
-// десктоп
+// GUI отвечает за ввод данных и отображение результата.
+// Вся компиляция остается в CompilerService, поэтому окно не дублирует бизнес-логику.
 public class CompilerGui extends JFrame {
-    private final JTextArea inputArea = new JTextArea();
+    private final JTextPane inputPane = new JTextPane();
     private final JTextArea outputArea = new JTextArea();
+    private final JPanel variablePanel = new JPanel(new GridLayout(0, 2, 6, 6));
+    private final Map<String, JTextField> variableFields = new LinkedHashMap<>();
     private final CompilerService compilerService = new CompilerService();
     private Path currentDirectory = Path.of(".");
+    private CompilerResult preparedResult;
 
-    // Создание окна
     public CompilerGui() {
         super("Компилятор префиксных арифметических выражений");
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        setSize(1000, 700);
+        setSize(1100, 760);
         setLocationRelativeTo(null);
 
-        inputArea.setLineWrap(true);
         outputArea.setEditable(false);
 
         add(createToolbar(), BorderLayout.NORTH);
         add(createMainPanel(), BorderLayout.CENTER);
     }
 
-    // Панель с кнопками загрузки файла и запуска компиляции
     private JPanel createToolbar() {
         JPanel panel = new JPanel(new BorderLayout());
         JPanel buttons = new JPanel();
@@ -59,22 +66,29 @@ public class CompilerGui extends JFrame {
         return panel;
     }
 
-    // окно области ввода и результатов
     private JSplitPane createMainPanel() {
+        outputArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 14));
         JPanel left = new JPanel(new BorderLayout());
         left.add(new JLabel("Входное выражение"), BorderLayout.NORTH);
-        left.add(new JScrollPane(inputArea), BorderLayout.CENTER);
+        left.add(new JScrollPane(inputPane), BorderLayout.CENTER);
+        left.add(createVariableInputPanel(), BorderLayout.SOUTH);
 
         JPanel right = new JPanel(new BorderLayout());
         right.add(new JLabel("Результаты компиляции"), BorderLayout.NORTH);
         right.add(new JScrollPane(outputArea), BorderLayout.CENTER);
 
         JSplitPane splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, left, right);
-        splitPane.setResizeWeight(0.35);
+        splitPane.setResizeWeight(0.38);
         return splitPane;
     }
 
-    // загружает выбранный текстовый файл
+    private JPanel createVariableInputPanel() {
+        JPanel wrapper = new JPanel(new BorderLayout());
+        wrapper.add(new JLabel("Значения переменных"), BorderLayout.NORTH);
+        wrapper.add(variablePanel, BorderLayout.CENTER);
+        return wrapper;
+    }
+
     private void chooseFile() {
         JFileChooser chooser = new JFileChooser(currentDirectory.toFile());
         int result = chooser.showOpenDialog(this);
@@ -85,36 +99,173 @@ public class CompilerGui extends JFrame {
         File file = chooser.getSelectedFile();
         try {
             currentDirectory = file.toPath().getParent();
-            inputArea.setText(compilerService.readSource(file.toPath()));
+            inputPane.setText(compilerService.readSource(file.toPath()));
+            clearErrorHighlight();
+            preparedResult = null;
+            rebuildVariablePanel(new CompilerResult(null, null, null, "", ""));
+            outputArea.setText("");
         } catch (Exception ex) {
             JOptionPane.showMessageDialog(this, "Не удалось прочитать файл: " + ex.getMessage());
         }
     }
 
-    // Запускает компиляцию выражения из поля ввода и записывает выходные файлы
+    // Сначала строим AST и список переменных. Если синтаксис неверный,
+    // подсвечиваем позицию ошибки прямо во входном выражении.
     private void compile() {
-        CompilerResult result = compilerService.compile(inputArea.getText(), currentDirectory, true);
+        clearErrorHighlight();
+        CompilerResult prepared = compilerService.prepare(inputPane.getText());
+        if (prepared.hasErrors()) {
+            prepared = compilerService.compile(inputPane.getText(), currentDirectory, true, Map.of());
+            showError(prepared);
+            preparedResult = prepared;
+            rebuildVariablePanel(prepared);
+            return;
+        }
+
+        if (prepared.isOptimizedToConstant()) {
+            CompilerResult result = compilerService.compilePrepared(prepared, currentDirectory, true, Map.of());
+            preparedResult = prepared;
+            rebuildVariablePanel(result);
+            outputArea.setText(formatResult(result));
+            return;
+        }
+
+        if (preparedResult == null || !preparedResult.getVariableNames().equals(prepared.getVariableNames())) {
+            preparedResult = prepared;
+            rebuildVariablePanel(prepared);
+        }
+
+        Map<String, Integer> variableValues = readVariableValues();
+        if (variableValues == null) {
+            outputArea.setText("Введите значения всех переменных и нажмите \"Компилировать\" еще раз.");
+            return;
+        }
+
+        CompilerResult result = compilerService.compilePrepared(prepared, currentDirectory, true, variableValues);
+        if (result.hasErrors()) {
+            showError(result);
+            return;
+        }
+
+        preparedResult = prepared;
         outputArea.setText(formatResult(result));
     }
 
-    // текст вывода
-    private String formatResult(CompilerResult result) {
-        if (result.hasErrors()) {
-            return "ОШИБКИ\n" + result.getErrors() + "\n\nФайл errors.log создан или обновлен.";
+    private void rebuildVariablePanel(CompilerResult prepared) {
+        variablePanel.removeAll();
+        variableFields.clear();
+
+        for (String variable : prepared.getVariableNames()) {
+            JTextField field = new JTextField(8);
+            variableFields.put(variable, field);
+            variablePanel.add(new JLabel("Введите значение " + variable + ":"));
+            variablePanel.add(field);
         }
 
-        String quadruples = result.getQuadruples().stream()
-                .map(Quadruple::toString)
+        if (prepared.getVariableNames().isEmpty()) {
+            variablePanel.add(new JLabel("Переменные не требуются"));
+        }
+
+        variablePanel.revalidate();
+        variablePanel.repaint();
+    }
+
+    private Map<String, Integer> readVariableValues() {
+        Map<String, Integer> values = new LinkedHashMap<>();
+
+        for (Map.Entry<String, JTextField> entry : variableFields.entrySet()) {
+            String text = entry.getValue().getText().trim();
+            if (text.isEmpty()) {
+                return null;
+            }
+            try {
+                values.put(entry.getKey(), Integer.parseInt(text));
+            } catch (NumberFormatException ex) {
+                JOptionPane.showMessageDialog(this, "Значение " + entry.getKey() + " должно быть целым числом.");
+                return null;
+            }
+        }
+
+        return values;
+    }
+
+    private void showError(CompilerResult result) {
+        highlightError(result.getErrorPosition());
+        outputArea.setText(formatError(result));
+    }
+
+    private void clearErrorHighlight() {
+        inputPane.getHighlighter().removeAllHighlights();
+    }
+
+    private void highlightError(Integer position) {
+        if (position == null) {
+            return;
+        }
+
+        int length = inputPane.getDocument().getLength();
+        if (length == 0) {
+            return;
+        }
+        int start = Math.max(0, Math.min(position, length - 1));
+        int end = Math.min(start + 1, length);
+
+        try {
+            Highlighter.HighlightPainter painter = new DefaultHighlighter.DefaultHighlightPainter(new Color(255, 170, 170));
+            inputPane.getHighlighter().addHighlight(start, end, painter);
+            inputPane.setCaretPosition(start);
+        } catch (BadLocationException ignored) {
+            // Если позиция вышла за границы документа, текст ошибки все равно будет показан справа.
+        }
+    }
+
+    private String formatError(CompilerResult result) {
+        StringBuilder builder = new StringBuilder();
+        builder.append("ОШИБКА\n");
+        if (result.getErrorPosition() != null) {
+            builder.append("Позиция ошибки: ").append(result.getErrorPosition()).append("\n\n");
+            builder.append(inputPane.getText()).append("\n");
+            builder.append(" ".repeat(Math.max(0, result.getErrorPosition())-1)).append("^\n\n");
+        }
+        builder.append("Ошибка: ").append(result.getErrors());
+        builder.append("\n\nФайл errors.log создан или обновлен.");
+        return builder.toString();
+    }
+
+    private String formatResult(CompilerResult result) {
+        if (result.isOptimizedToConstant()) {
+            return "AST исходный:\n" + result.getOriginalAst().print()
+                    + "\n\nAST после оптимизации:\n" + result.getOptimizedAst().print()
+                    + "\n\nВыражение полностью оптимизировано до константы."
+                    + "\n\nРезультат выражения: " + result.getEvaluationResult()
+                    + "\n\nКлассическая таблица четверок:\nне требуется"
+                    + "\n\nВычисляемая таблица четверок:\nне требуется"
+                    + "\n\nAssembler:\nне требуется";
+        }
+
+        String evaluatedQuadruples = result.getQuadruples().stream()
+                .map(Quadruple::toEvaluatedString)
                 .collect(Collectors.joining(System.lineSeparator()));
 
         return "AST исходный:\n" + result.getOriginalAst().print()
                 + "\n\nAST после оптимизации:\n" + result.getOptimizedAst().print()
-                + "\n\nЧетверки:\n" + quadruples
+                + "\n\nЗначения переменных:\n" + formatVariables(result)
+                + "\n\nРезультат выражения: " + result.getEvaluationResult()
+                + "\n\nКлассическая таблица четверок:\nсм. левую часть вычисляемой таблицы"
+                + "\n\nВычисляемая таблица четверок:\n" + evaluatedQuadruples
                 + "\n\nAssembler:\n" + result.getAssembler()
                 + "\nФайлы quadruples.txt, output.asm и errors.log созданы или обновлены.";
     }
 
-    // запуск
+    private String formatVariables(CompilerResult result) {
+        if (result.getVariableValues().isEmpty()) {
+            return "нет";
+        }
+        return result.getVariableValues().entrySet().stream()
+                .map(entry -> entry.getKey() + " = " + entry.getValue())
+                .collect(Collectors.joining(System.lineSeparator()));
+    }
+
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> new CompilerGui().setVisible(true));
     }
